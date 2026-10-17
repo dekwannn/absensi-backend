@@ -1,0 +1,19 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Virtualenv
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Database lokal (sisa versi SQLite)
+*.db
+
+# IDE
+.vscode/
+.idea/

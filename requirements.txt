@@ -1,0 +1,19 @@
+pydantic-settings
+
+fastapi
+uvicorn[standard]
+
+# MongoDB — pakai pymongo biasa (sync)
+pymongo
+
+# Auth
+python-jose[cryptography]
+passlib[bcrypt]
+
+# Face Recognition
+face_recognition
+numpy
+pillow
+
+# Form / File Upload
+python-multipart
