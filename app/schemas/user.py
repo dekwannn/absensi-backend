@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import datetime
 from enum import Enum
@@ -21,19 +21,35 @@ class TokenResponse(BaseModel):
 
 
 # ─── User ─────────────────────────────────────────────────
-class UserCreate(BaseModel):
-    name: str
-    username: str
-    password: str
+PASSWORD_MIN = 6  # samakan dengan validasi di frontend
+
+
+class _UserFields(BaseModel):
+    @field_validator("name", "username", "email", "nik", mode="before", check_fields=False)
+    @classmethod
+    def strip_text(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("email", "nik", check_fields=False)
+    @classmethod
+    def empty_to_none(cls, v):
+        # string kosong disimpan sebagai None agar tidak bentrok dengan unique index
+        return v or None
+
+
+class UserCreate(_UserFields):
+    name: str = Field(min_length=1)
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=PASSWORD_MIN)
     email: Optional[str] = None
     nik: Optional[str] = None
     role: UserRole = UserRole.user
 
-class UserUpdate(BaseModel):
-    name: Optional[str] = None
+class UserUpdate(_UserFields):
+    name: Optional[str] = Field(default=None, min_length=1)
     email: Optional[str] = None
     nik: Optional[str] = None
-    password: Optional[str] = None
+    password: Optional[str] = Field(default=None, min_length=PASSWORD_MIN)
     role: Optional[UserRole] = None
     is_active: Optional[bool] = None
 

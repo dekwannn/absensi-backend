@@ -5,6 +5,7 @@ from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from bson import ObjectId
+from bson.errors import InvalidId
 from app.core.config import settings
 from app.db.mongo import get_db
 
@@ -52,7 +53,12 @@ def get_current_user(
     if not user_id:
         raise HTTPException(status_code=401, detail="Token tidak valid.")
 
-    user = db["users"].find_one({"_id": ObjectId(user_id)})
+    try:
+        oid = ObjectId(user_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=401, detail="Token tidak valid.")
+
+    user = db["users"].find_one({"_id": oid})
     if not user:
         raise HTTPException(status_code=404, detail="User tidak ditemukan.")
     if user.get("is_active") == False:

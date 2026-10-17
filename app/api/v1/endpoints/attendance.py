@@ -1,6 +1,10 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Form
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta, timezone
+from typing import Optional
+import logging
+
+from pymongo.errors import DuplicateKeyError
 
 from app.core.config import settings
 from app.db.mongo import get_db
@@ -9,6 +13,7 @@ from app.services.geo_logic import GeoService
 from app.services.auth_service import get_current_user, require_admin
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 OFFICE_LAT = settings.OFFICE_LAT
 OFFICE_LON = settings.OFFICE_LON
@@ -110,6 +115,28 @@ def get_checkout_status(now: datetime) -> dict:
     }
 
 
+SERVER_ERROR = {"status": "error", "detail": "Terjadi kesalahan di server. Silakan coba lagi."}
+
+
+def _list_records(db, query: dict, limit: Optional[int], skip: int) -> dict:
+    """Riwayat terbaru dulu. Tanpa `limit` → semua data (perilaku lama tetap)."""
+    cursor = db["attendances"].find(query).sort([("date", -1), ("check_in_time", -1)]).skip(skip)
+    if limit is not None:
+        cursor = cursor.limit(limit)
+    return {
+        "status": "success",
+        "data": [_fmt(r) for r in cursor],
+        "total": db["attendances"].count_documents(query),
+        "skip": skip,
+        "limit": limit,
+    }
+
+
+# parameter pagination, dipakai bersama oleh endpoint riwayat
+LimitParam = Query(None, ge=1, le=500, description="Jumlah data per halaman (kosong = semua)")
+SkipParam = Query(0, ge=0, description="Lewati sejumlah data pertama")
+
+
 def _fmt(a):
     return {
         "id": str(a["_id"]),
@@ -201,25 +228,30 @@ def check_in(
             })
 
         # 6. Simpan ke Database
-        db["attendances"].insert_one({
-            "user_id": str(current_user["_id"]),
-            "username": current_user.get("username", "Unknown"),
-            "date": today_str,
-            "check_in_time": now,
-            "check_out_time": None,
-            "latitude": latitude,
-            "longitude": longitude,
-            "distance": distance,
-            "checkout_latitude": None,
-            "checkout_longitude": None,
-            "checkout_distance": None,
-            "checkin_status": time_check["status"],
-            "checkin_label": time_check["label"],
-            "checkout_status": None,
-            "checkout_label": None,
-            "status": "present",
-            "created_at": now,
-        })
+        try:
+            db["attendances"].insert_one({
+                "user_id": str(current_user["_id"]),
+                "username": current_user.get("username", "Unknown"),
+                "date": today_str,
+                "check_in_time": now,
+                "check_out_time": None,
+                "latitude": latitude,
+                "longitude": longitude,
+                "distance": distance,
+                "checkout_latitude": None,
+                "checkout_longitude": None,
+                "checkout_distance": None,
+                "checkin_status": time_check["status"],
+                "checkin_label": time_check["label"],
+                "checkout_status": None,
+                "checkout_label": None,
+                "status": "present",
+                "created_at": now,
+            })
+        except DuplicateKeyError:
+            return JSONResponse(status_code=400, content={
+                "status": "error", "detail": "Anda sudah check-in hari ini."
+            })
 
         return {
             "status": "success",
@@ -231,8 +263,9 @@ def check_in(
             "checkin_label": time_check["label"],
         }
 
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
+    except Exception:
+        logger.exception("Check-in gagal untuk user %s", current_user.get("username"))
+        return JSONResponse(status_code=500, content=SERVER_ERROR)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -330,8 +363,9 @@ def check_out(
             "checkout_label": time_check["label"],
         }
 
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
+    except Exception:
+        logger.exception("Check-out gagal untuk user %s", current_user.get("username"))
+        return JSONResponse(status_code=500, content=SERVER_ERROR)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -339,13 +373,13 @@ def check_out(
 # ═══════════════════════════════════════════════════════════
 
 @router.get("/attendance/my-history")
-def my_history(current_user: dict = Depends(get_current_user), db=Depends(get_db)):
-    records = list(
-        db["attendances"]
-        .find({"user_id": str(current_user["_id"])})
-        .sort("date", -1)
-    )
-    return {"status": "success", "data": [_fmt(r) for r in records]}
+def my_history(
+    limit: Optional[int] = LimitParam,
+    skip: int = SkipParam,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return _list_records(db, {"user_id": str(current_user["_id"])}, limit, skip)
 
 
 @router.get("/attendance/today")
@@ -378,16 +412,21 @@ def today_status(current_user: dict = Depends(get_current_user), db=Depends(get_
 # ═══════════════════════════════════════════════════════════
 
 @router.get("/attendance")
-def get_all(db=Depends(get_db), _: dict = Depends(require_admin)):
-    records = list(db["attendances"].find().sort("date", -1))
-    return {"status": "success", "data": [_fmt(r) for r in records]}
+def get_all(
+    limit: Optional[int] = LimitParam,
+    skip: int = SkipParam,
+    db=Depends(get_db),
+    _: dict = Depends(require_admin),
+):
+    return _list_records(db, {}, limit, skip)
 
 
 @router.get("/attendance/user/{user_id}")
-def user_history(user_id: str, db=Depends(get_db), _: dict = Depends(require_admin)):
-    records = list(
-        db["attendances"]
-        .find({"user_id": user_id})
-        .sort("date", -1)
-    )
-    return {"status": "success", "data": [_fmt(r) for r in records]}
+def user_history(
+    user_id: str,
+    limit: Optional[int] = LimitParam,
+    skip: int = SkipParam,
+    db=Depends(get_db),
+    _: dict = Depends(require_admin),
+):
+    return _list_records(db, {"user_id": user_id}, limit, skip)

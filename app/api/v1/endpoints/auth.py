@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from datetime import datetime
-from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from app.db.mongo import get_db
 from app.schemas.user import LoginRequest, UserCreate, UserOut
 from app.services.auth_service import (
     hash_password, verify_password, create_access_token, get_current_user
 )
+from app.services.user_service import ensure_unique_user_fields, duplicate_key_error
 
 router = APIRouter()
 
@@ -38,10 +39,7 @@ def get_me(current_user: dict = Depends(get_current_user)):
 @router.post("/register")
 def register(body: UserCreate, db=Depends(get_db)):
     """Daftar akun baru (role selalu 'user')"""
-    if db["users"].find_one({"username": body.username}):
-        raise HTTPException(status_code=400, detail="Username sudah digunakan.")
-    if body.email and db["users"].find_one({"email": body.email}):
-        raise HTTPException(status_code=400, detail="Email sudah digunakan.")
+    ensure_unique_user_fields(db, body.model_dump())
 
     doc = {
         "name": body.name,
@@ -55,6 +53,9 @@ def register(body: UserCreate, db=Depends(get_db)):
         "created_at": datetime.utcnow(),
         "updated_at": None,
     }
-    result = db["users"].insert_one(doc)
+    try:
+        result = db["users"].insert_one(doc)
+    except DuplicateKeyError as e:
+        raise duplicate_key_error(e)
     doc["_id"] = result.inserted_id
     return UserOut.from_doc(doc)

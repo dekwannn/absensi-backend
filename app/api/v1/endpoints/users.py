@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from datetime import datetime
-from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
-from app.db.mongo import get_db
+from app.db.mongo import get_db, to_object_id
 from app.schemas.user import UserCreate, UserUpdate, UserOut
-from app.services.auth_service import get_current_user, require_admin
+from app.services.auth_service import get_current_user, require_admin, hash_password
 from app.services.face_logic import FaceService
+from app.services.user_service import ensure_unique_user_fields, duplicate_key_error
+
+USER_NOT_FOUND = "User tidak ditemukan."
 
 router = APIRouter()
 
@@ -20,19 +23,18 @@ def list_users(db=Depends(get_db), _: dict = Depends(require_admin)):
 @router.get("/{user_id}")
 def get_user(user_id: str, db=Depends(get_db), _: dict = Depends(require_admin)):
     """[Admin] Detail user"""
-    user = db["users"].find_one({"_id": ObjectId(user_id)})
+    oid = to_object_id(user_id, USER_NOT_FOUND)
+    user = db["users"].find_one({"_id": oid})
     if not user:
-        raise HTTPException(status_code=404, detail="User tidak ditemukan.")
+        raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
     return UserOut.from_doc(user)
 
 
 @router.post("")
 def create_user(body: UserCreate, db=Depends(get_db), _: dict = Depends(require_admin)):
     """[Admin] Buat user baru"""
-    if db["users"].find_one({"username": body.username}):
-        raise HTTPException(status_code=400, detail="Username sudah digunakan.")
+    ensure_unique_user_fields(db, body.model_dump())
 
-    from app.services.auth_service import hash_password
     doc = {
         "name": body.name,
         "username": body.username,
@@ -45,7 +47,10 @@ def create_user(body: UserCreate, db=Depends(get_db), _: dict = Depends(require_
         "created_at": datetime.utcnow(),
         "updated_at": None,
     }
-    result = db["users"].insert_one(doc)
+    try:
+        result = db["users"].insert_one(doc)
+    except DuplicateKeyError as e:
+        raise duplicate_key_error(e)
     doc["_id"] = result.inserted_id
     return UserOut.from_doc(doc)
 
@@ -53,9 +58,10 @@ def create_user(body: UserCreate, db=Depends(get_db), _: dict = Depends(require_
 @router.put("/{user_id}")
 def update_user(user_id: str, body: UserUpdate, db=Depends(get_db), _: dict = Depends(require_admin)):
     """[Admin] Update data user"""
-    user = db["users"].find_one({"_id": ObjectId(user_id)})
+    oid = to_object_id(user_id, USER_NOT_FOUND)
+    user = db["users"].find_one({"_id": oid})
     if not user:
-        raise HTTPException(status_code=404, detail="User tidak ditemukan.")
+        raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
 
     updates = {}
     if body.name is not None:       updates["name"] = body.name
@@ -64,14 +70,18 @@ def update_user(user_id: str, body: UserUpdate, db=Depends(get_db), _: dict = De
     if body.role is not None:       updates["role"] = body.role
     if body.is_active is not None:  updates["is_active"] = body.is_active
     if body.password is not None:
-        from app.services.auth_service import hash_password
         updates["hashed_password"] = hash_password(body.password)
+
+    ensure_unique_user_fields(db, updates, exclude_id=oid)
 
     if updates:
         updates["updated_at"] = datetime.utcnow()
-        db["users"].update_one({"_id": ObjectId(user_id)}, {"$set": updates})
+        try:
+            db["users"].update_one({"_id": oid}, {"$set": updates})
+        except DuplicateKeyError as e:
+            raise duplicate_key_error(e)
 
-    updated = db["users"].find_one({"_id": ObjectId(user_id)})
+    updated = db["users"].find_one({"_id": oid})
     return UserOut.from_doc(updated)
 
 
@@ -81,11 +91,12 @@ def delete_user(user_id: str, db=Depends(get_db), current_user: dict = Depends(r
     if str(current_user["_id"]) == user_id:
         raise HTTPException(status_code=400, detail="Tidak bisa menghapus akun sendiri.")
 
-    user = db["users"].find_one({"_id": ObjectId(user_id)})
+    oid = to_object_id(user_id, USER_NOT_FOUND)
+    user = db["users"].find_one({"_id": oid})
     if not user:
-        raise HTTPException(status_code=404, detail="User tidak ditemukan.")
+        raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
 
-    db["users"].delete_one({"_id": ObjectId(user_id)})
+    db["users"].delete_one({"_id": oid})
     return {"status": "success", "message": f"User {user['name']} berhasil dihapus."}
 
 
@@ -99,16 +110,17 @@ def enroll_face(
     _: dict = Depends(require_admin)
 ):
     """[Admin] Daftarkan wajah user"""
-    user = db["users"].find_one({"_id": ObjectId(user_id)})
+    oid = to_object_id(user_id, USER_NOT_FOUND)
+    user = db["users"].find_one({"_id": oid})
     if not user:
-        raise HTTPException(status_code=404, detail="User tidak ditemukan.")
+        raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
 
     encoding = FaceService.process_image(file)
     if encoding is None:
         raise HTTPException(status_code=400, detail="Wajah tidak terdeteksi pada foto.")
 
     db["users"].update_one(
-        {"_id": ObjectId(user_id)},
+        {"_id": oid},
         {"$set": {"face_encoding": FaceService.encoding_to_db(encoding), "updated_at": datetime.utcnow()}}
     )
     return {"status": "success", "message": f"Wajah {user['name']} berhasil didaftarkan."}
@@ -117,12 +129,13 @@ def enroll_face(
 @router.delete("/{user_id}/enroll-face")
 def remove_face(user_id: str, db=Depends(get_db), _: dict = Depends(require_admin)):
     """[Admin] Hapus data wajah user"""
-    user = db["users"].find_one({"_id": ObjectId(user_id)})
+    oid = to_object_id(user_id, USER_NOT_FOUND)
+    user = db["users"].find_one({"_id": oid})
     if not user:
-        raise HTTPException(status_code=404, detail="User tidak ditemukan.")
+        raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
 
     db["users"].update_one(
-        {"_id": ObjectId(user_id)},
+        {"_id": oid},
         {"$set": {"face_encoding": None, "updated_at": datetime.utcnow()}}
     )
     return {"status": "success", "message": "Data wajah berhasil dihapus."}
