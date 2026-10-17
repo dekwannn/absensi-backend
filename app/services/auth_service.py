@@ -55,8 +55,6 @@ def get_current_user(
     user = db["users"].find_one({"_id": ObjectId(user_id)})
     if not user:
         raise HTTPException(status_code=404, detail="User tidak ditemukan.")
-    if not user.get("is_active", True) == False:
-        pass  # aktif, lanjut
     if user.get("is_active") == False:
         raise HTTPException(status_code=403, detail="Akun dinonaktifkan.")
     return user
