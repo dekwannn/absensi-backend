@@ -362,6 +362,15 @@ def my_history(
     return _list_records(db, {"user_id": str(current_user["_id"])}, limit, skip, month)
 
 
+@router.get("/attendance/office")
+def office_location(_: dict = Depends(get_current_user)):
+    """Titik kantor & radius absen, untuk peta di frontend (validasi tetap di server)."""
+    return {
+        "status": "success",
+        "data": {"latitude": OFFICE_LAT, "longitude": OFFICE_LON, "radius": MAX_RADIUS},
+    }
+
+
 @router.get("/attendance/today")
 def today_status(current_user: dict = Depends(get_current_user), db=Depends(get_db)):
     today_str = datetime.now(WITA).strftime("%Y-%m-%d")
