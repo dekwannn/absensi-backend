@@ -115,11 +115,25 @@ def get_checkout_status(now: datetime) -> dict:
     }
 
 
-SERVER_ERROR = {"status": "error", "detail": "Terjadi kesalahan di server. Silakan coba lagi."}
+SERVER_ERROR = {"status": "error", "code": "SERVER_ERROR",
+                "detail": "Terjadi kesalahan di server. Silakan coba lagi."}
 
 
-def _list_records(db, query: dict, limit: Optional[int], skip: int) -> dict:
+def _error(code: str, detail: str, status_code: int = 400) -> JSONResponse:
+    """
+    Respons gagal absensi. `code` stabil untuk dipakai frontend memilih pesan/ikon
+    (jangan menebak dari isi `detail`): OUTSIDE_HOURS, OUT_OF_RANGE,
+    ALREADY_CHECKED_IN, ALREADY_CHECKED_OUT, NOT_CHECKED_IN, FACE_NOT_ENROLLED,
+    FACE_REENROLL_REQUIRED, FACE_NOT_DETECTED, FACE_MISMATCH, SERVER_ERROR.
+    """
+    return JSONResponse(status_code=status_code, content={"status": "error", "code": code, "detail": detail})
+
+
+def _list_records(db, query: dict, limit: Optional[int], skip: int, month: Optional[str] = None) -> dict:
     """Riwayat terbaru dulu. Tanpa `limit` → semua data (perilaku lama tetap)."""
+    if month:
+        # field `date` berformat YYYY-MM-DD, jadi perbandingan string = perbandingan tanggal
+        query = {**query, "date": {"$gte": f"{month}-01", "$lte": f"{month}-31"}}
     cursor = db["attendances"].find(query).sort([("date", -1), ("check_in_time", -1)]).skip(skip)
     if limit is not None:
         cursor = cursor.limit(limit)
@@ -135,6 +149,7 @@ def _list_records(db, query: dict, limit: Optional[int], skip: int) -> dict:
 # parameter pagination, dipakai bersama oleh endpoint riwayat
 LimitParam = Query(None, ge=1, le=500, description="Jumlah data per halaman (kosong = semua)")
 SkipParam = Query(0, ge=0, description="Lewati sejumlah data pertama")
+MonthParam = Query(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$", description="Filter bulan, format YYYY-MM")
 
 
 def _fmt(a):
@@ -179,20 +194,14 @@ def check_in(
         # 1. Cek jam — boleh check-in sekarang?
         time_check = get_checkin_status(now)
         if not time_check["can"]:
-            return JSONResponse(status_code=400, content={
-                "status": "error",
-                "detail": time_check["label"]
-            })
+            return _error("OUTSIDE_HOURS", time_check["label"])
 
         # 2. Validasi Lokasi
         is_valid_loc, distance = GeoService.is_within_radius(
             latitude, longitude, OFFICE_LAT, OFFICE_LON, MAX_RADIUS
         )
         if not is_valid_loc:
-            return JSONResponse(status_code=400, content={
-                "status": "error",
-                "detail": f"Jarak Anda: {int(distance)}m. Maksimal: {MAX_RADIUS}m."
-            })
+            return _error("OUT_OF_RANGE", f"Jarak Anda: {int(distance)}m. Maksimal: {MAX_RADIUS:g}m.")
 
         # 3. Cek sudah check-in hari ini
         existing = db["attendances"].find_one({
@@ -200,32 +209,22 @@ def check_in(
             "date": today_str
         })
         if existing:
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Anda sudah check-in hari ini."
-            })
+            return _error("ALREADY_CHECKED_IN", "Anda sudah check-in hari ini.")
 
         # 4. Cek wajah terdaftar
         if not current_user.get("face_encoding"):
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Wajah Anda belum didaftarkan. Hubungi admin."
-            })
+            return _error("FACE_NOT_ENROLLED", "Wajah Anda belum didaftarkan. Hubungi admin.")
         known_encoding = FaceService.encoding_from_db(current_user["face_encoding"])
         if known_encoding is None:
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Data wajah Anda perlu didaftarkan ulang. Hubungi admin."
-            })
+            return _error("FACE_REENROLL_REQUIRED", "Data wajah Anda perlu didaftarkan ulang. Hubungi admin.")
 
         # 5. Validasi Wajah
         unknown_encoding = FaceService.process_image(file)
         if unknown_encoding is None:
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Wajah tidak terdeteksi."
-            })
+            return _error("FACE_NOT_DETECTED", "Wajah tidak terdeteksi.")
 
         if not FaceService.compare_face(known_encoding, unknown_encoding):
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Wajah tidak cocok dengan akun Anda."
-            })
+            return _error("FACE_MISMATCH", "Wajah tidak cocok dengan akun Anda.")
 
         # 6. Simpan ke Database
         try:
@@ -249,9 +248,7 @@ def check_in(
                 "created_at": now,
             })
         except DuplicateKeyError:
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Anda sudah check-in hari ini."
-            })
+            return _error("ALREADY_CHECKED_IN", "Anda sudah check-in hari ini.")
 
         return {
             "status": "success",
@@ -287,43 +284,29 @@ def check_out(
         # 1. Cek jam — boleh check-out sekarang?
         time_check = get_checkout_status(now)
         if not time_check["can"]:
-            return JSONResponse(status_code=400, content={
-                "status": "error",
-                "detail": time_check["label"]
-            })
+            return _error("OUTSIDE_HOURS", time_check["label"])
 
         # 2. Validasi Lokasi
         is_valid_loc, distance = GeoService.is_within_radius(
             latitude, longitude, OFFICE_LAT, OFFICE_LON, MAX_RADIUS
         )
         if not is_valid_loc:
-            return JSONResponse(status_code=400, content={
-                "status": "error",
-                "detail": f"Jarak Anda: {int(distance)}m. Maksimal: {MAX_RADIUS}m."
-            })
+            return _error("OUT_OF_RANGE", f"Jarak Anda: {int(distance)}m. Maksimal: {MAX_RADIUS:g}m.")
 
         # 3. Cek wajah terdaftar
         if not current_user.get("face_encoding"):
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Wajah Anda belum didaftarkan."
-            })
+            return _error("FACE_NOT_ENROLLED", "Wajah Anda belum didaftarkan.")
         known_encoding = FaceService.encoding_from_db(current_user["face_encoding"])
         if known_encoding is None:
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Data wajah Anda perlu didaftarkan ulang. Hubungi admin."
-            })
+            return _error("FACE_REENROLL_REQUIRED", "Data wajah Anda perlu didaftarkan ulang. Hubungi admin.")
 
         # 4. Validasi Wajah
         unknown_encoding = FaceService.process_image(file)
         if unknown_encoding is None:
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Wajah tidak terdeteksi."
-            })
+            return _error("FACE_NOT_DETECTED", "Wajah tidak terdeteksi.")
 
         if not FaceService.compare_face(known_encoding, unknown_encoding):
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Wajah tidak cocok dengan akun Anda."
-            })
+            return _error("FACE_MISMATCH", "Wajah tidak cocok dengan akun Anda.")
 
         # 5. Cari attendance hari ini
         record = db["attendances"].find_one({
@@ -331,14 +314,10 @@ def check_out(
             "date": today_str
         })
         if not record:
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": "Anda belum check-in hari ini."
-            })
+            return _error("NOT_CHECKED_IN", "Anda belum check-in hari ini.")
         if record.get("check_out_time"):
             waktu = to_wita(record["check_out_time"])
-            return JSONResponse(status_code=400, content={
-                "status": "error", "detail": f"Anda sudah check-out pukul {waktu[11:16]}."
-            })
+            return _error("ALREADY_CHECKED_OUT", f"Anda sudah check-out pukul {waktu[11:16]}.")
 
         # 6. Update check-out
         db["attendances"].update_one(
@@ -376,10 +355,11 @@ def check_out(
 def my_history(
     limit: Optional[int] = LimitParam,
     skip: int = SkipParam,
+    month: Optional[str] = MonthParam,
     current_user: dict = Depends(get_current_user),
     db=Depends(get_db),
 ):
-    return _list_records(db, {"user_id": str(current_user["_id"])}, limit, skip)
+    return _list_records(db, {"user_id": str(current_user["_id"])}, limit, skip, month)
 
 
 @router.get("/attendance/today")
@@ -415,10 +395,11 @@ def today_status(current_user: dict = Depends(get_current_user), db=Depends(get_
 def get_all(
     limit: Optional[int] = LimitParam,
     skip: int = SkipParam,
+    month: Optional[str] = MonthParam,
     db=Depends(get_db),
     _: dict = Depends(require_admin),
 ):
-    return _list_records(db, {}, limit, skip)
+    return _list_records(db, {}, limit, skip, month)
 
 
 @router.get("/attendance/user/{user_id}")
@@ -426,7 +407,8 @@ def user_history(
     user_id: str,
     limit: Optional[int] = LimitParam,
     skip: int = SkipParam,
+    month: Optional[str] = MonthParam,
     db=Depends(get_db),
     _: dict = Depends(require_admin),
 ):
-    return _list_records(db, {"user_id": user_id}, limit, skip)
+    return _list_records(db, {"user_id": user_id}, limit, skip, month)

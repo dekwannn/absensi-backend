@@ -33,13 +33,15 @@ app.include_router(router, prefix="/api/v1")
 
 
 FIELD_LABELS = {"name": "Nama", "username": "Username", "password": "Password",
-                "email": "Email", "nik": "NIK", "file": "Foto"}
+                "email": "Email", "nik": "NIK", "file": "Foto", "month": "Bulan"}
 
 
 def _validation_message(err: dict) -> str:
     field = str(err["loc"][-1]) if err.get("loc") else "data"
     label = FIELD_LABELS.get(field, field.replace("_", " ").capitalize())
     ctx = err.get("ctx") or {}
+    if err["type"] == "string_pattern_mismatch" and field == "month":
+        return "Format bulan harus YYYY-MM, contoh 2026-10."
     if err["type"] == "missing":
         return f"{label} wajib diisi."
     if err["type"] == "string_too_short":
